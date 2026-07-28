@@ -1,0 +1,27 @@
+# Manual rollback (docs/PIPELINE-SPEC.md Stage 9). Use this when a bad
+# release slipped past verification some other way, or to test that
+# rollback actually works without waiting for a real incident.
+#
+# All the logic lives in _rollback.yml (shared with release.yml's automatic
+# rollback path); this file just gives it a human-triggerable entry point.
+name: rollback (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why you're rolling back (recorded in the incident issue)"
+        required: false
+        default: "manual rollback"
+
+jobs:
+  rollback:
+    name: rollback
+    uses: ./.github/workflows/_rollback.yml
+    with:
+      failed_sha: ${{ inputs.reason }}
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+      issues: write

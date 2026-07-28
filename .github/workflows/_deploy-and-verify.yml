@@ -1,0 +1,136 @@
+# Reusable workflow: Stage 6-7 from docs/PIPELINE-SPEC.md — deploy a given
+# ref to GitHub Pages, then verify it from the outside.
+#
+# Called twice from this repo's workflows, with a different `ref` each time:
+#   - release.yml   -> ref: the commit that just passed Stage 1-5
+#   - _rollback.yml -> ref: the `last-good` tag, when Stage 7 above failed
+#
+# Using the same code path for both means a rollback is deployed and
+# verified by the identical process as a normal release — no separate,
+# less-tested "rollback deploy" logic that only gets exercised during an
+# actual incident.
+name: deploy-and-verify
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "git ref to deploy (commit SHA or tag)"
+        required: true
+        type: string
+      label:
+        description: "release | rollback — cosmetic, only affects log/summary text"
+        required: false
+        type: string
+        default: release
+    outputs:
+      page_url:
+        value: ${{ jobs.deploy.outputs.page_url }}
+      short_sha:
+        value: ${{ jobs.deploy.outputs.short_sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────── Stage 6 ─────────────────────────────
+  deploy:
+    name: "Stage 6 (${{ inputs.label }}): deploy to GitHub Pages"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+      short_sha: ${{ steps.sha.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - id: sha
+        run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/configure-pages@v5
+
+      # Builds public/ into dist/ with a build marker injected and a
+      # 404.html added for SPA-fallback-on-Pages. See the script itself for
+      # why this can't just upload public/ directly.
+      - name: Prepare Pages artifact (build marker + 404.html)
+        run: bash scripts/prepare-pages-artifact.sh "${{ steps.sha.outputs.value }}" dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ───────────────────────────── Stage 7 ─────────────────────────────
+  verify:
+    name: "Stage 7 (${{ inputs.label }}): verify production"
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # 7.1 — Pages propagation can lag a few seconds behind the API call
+      # that reports "deployed".
+      - name: Wait for the deployment to answer (up to 2 minutes)
+        run: |
+          url="${{ needs.deploy.outputs.page_url }}"
+          for i in $(seq 1 24); do
+            if curl -fsS "$url" >/dev/null 2>&1; then
+              echo "up after ${i}0s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$url did not answer within 2 minutes"
+          exit 1
+
+      # 7.2 (marker) + 7.3 (content/SPA-fallback subset) + 7.5 (HTTPS,
+      # implicit: curl --fail with no -k would reject a bad cert) all live
+      # in smoke.sh's --target=pages mode.
+      - name: Smoke test against the live URL (marker + content, Pages mode)
+        run: |
+          bash tests/smoke.sh "${{ needs.deploy.outputs.page_url }}" \
+            --target=pages --marker="${{ needs.deploy.outputs.short_sha }}"
+
+      # 7.4 — full Playwright suite against production, not just a container.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: Browser functional tests against the live URL
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: npx playwright test
+
+      - name: Upload Playwright report (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ inputs.label }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

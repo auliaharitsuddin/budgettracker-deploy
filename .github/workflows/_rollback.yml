@@ -1,0 +1,140 @@
+# Reusable workflow: Stage 9 from docs/PIPELINE-SPEC.md — automatic rollback.
+#
+# Called automatically by release.yml when Stage 7 verification fails, and
+# by rollback.yml for a manual, human-triggered rollback. Both paths do the
+# exact same thing: redeploy the `last-good` tag through the identical
+# deploy-and-verify workflow used for normal releases (see
+# _deploy-and-verify.yml), then open a GitHub issue either way — success or
+# failure — because a rollback is always worth a human looking at it.
+name: rollback
+
+on:
+  workflow_call:
+    inputs:
+      failed_sha:
+        description: "the commit that failed verification (for the issue text)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check-target:
+    name: find the last-good tag
+    runs-on: ubuntu-latest
+    outputs:
+      has_target: ${{ steps.check.outputs.has_target }}
+      target_sha: ${{ steps.check.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags, not just the latest commit
+
+      - id: check
+        run: |
+          if git rev-parse -q --verify "refs/tags/last-good" >/dev/null 2>&1; then
+            echo "has_target=true" >> "$GITHUB_OUTPUT"
+            echo "target_sha=$(git rev-list -n 1 last-good)" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_target=false" >> "$GITHUB_OUTPUT"
+            echo "target_sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 9.1 — nothing to roll back to (this looks like the very first release).
+  # Fixing forward is the only option; make sure that's visible immediately
+  # instead of the pipeline silently doing nothing.
+  no-target:
+    name: alert (no rollback target)
+    needs: check-target
+    if: needs.check-target.outputs.has_target != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Release ${{ inputs.failed_sha }} failed verification -- no rollback target exists`,
+              labels: ["incident", "severity:high"],
+              body: [
+                `Stage 7 verification failed for commit \`${{ inputs.failed_sha }}\`.`,
+                "",
+                "No `last-good` tag exists yet, so there is nothing this pipeline can " +
+                "automatically roll back to (this is expected on the very first " +
+                "successful-build-but-failed-verification release). Fix forward.",
+                "",
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              ].join("\n"),
+            });
+
+      - name: still fail this run
+        run: exit 1
+
+  # 9.2 + 9.3 — redeploy last-good and verify it, via the exact same
+  # deploy-and-verify path a normal release uses.
+  redeploy:
+    name: redeploy last-good
+    needs: check-target
+    if: needs.check-target.outputs.has_target == 'true'
+    uses: ./.github/workflows/_deploy-and-verify.yml
+    with:
+      ref: ${{ needs.check-target.outputs.target_sha }}
+      label: rollback
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+  # 9.4 — always open an issue: one flavor if the rollback worked, a more
+  # severe one if the rollback itself failed (9.5: never move last-good in
+  # either case — it must keep pointing at a version proven to work).
+  report:
+    name: open incident issue
+    needs: [check-target, redeploy]
+    if: always() && needs.check-target.outputs.has_target == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const ok = "${{ needs.redeploy.result }}" === "success";
+            const target = "${{ needs.check-target.outputs.target_sha }}";
+            const failedSha = "${{ inputs.failed_sha }}";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const title = ok
+              ? `Rolled back to ${target} after ${failedSha} failed verification`
+              : `ROLLBACK ITSELF FAILED -- manual intervention needed (failed: ${failedSha}, target: ${target})`;
+
+            const body = ok
+              ? [
+                  `Commit \`${failedSha}\` failed Stage 7 production verification.`,
+                  `The pipeline automatically redeployed \`${target}\` (the last verified-good build) and re-verified it successfully.`,
+                  "",
+                  "`last-good` was left unchanged, since it already points at this same commit.",
+                  "",
+                  `Run: ${runUrl}`,
+                ].join("\n")
+              : [
+                  `Commit \`${failedSha}\` failed Stage 7 production verification, `,
+                  `and the automatic rollback to \`${target}\` ALSO failed re-verification.`,
+                  "",
+                  "The site may currently be serving a broken build. This needs a human now.",
+                  "",
+                  `Run: ${runUrl}`,
+                ].join("\n");
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ok ? ["incident"] : ["incident", "severity:high"],
+              body,
+            });
+
+      - name: fail this run if the rollback itself failed
+        if: needs.redeploy.result != 'success'
+        run: exit 1

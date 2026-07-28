@@ -1,0 +1,13 @@
+{
+  "name": "budgettracker-deploy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Playwright functional tests for the BudgetTracker deployment pipeline (Stage 4 / docs/PIPELINE-SPEC.md)",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

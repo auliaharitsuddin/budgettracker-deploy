@@ -1,0 +1,12 @@
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
+desktop.ini
+node_modules/
+playwright-report/
+test-results/
+dist/
+sbom.spdx.json
+trivy-results.sarif

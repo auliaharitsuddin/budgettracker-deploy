@@ -1,0 +1,178 @@
+# Stage 10 (docs/PIPELINE-SPEC.md): continuous monitoring of the live site.
+#
+# Two limitations worth knowing, both documented in the spec:
+#   - GitHub's cron is best-effort; it can fire late by minutes under load.
+#     This is not a substitute for real uptime monitoring.
+#   - Scheduled workflows are auto-disabled after ~60 days without repo
+#     activity, so this can go quiet on a dormant project.
+name: monitor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: production health check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the last-good tag for the drift check
+
+      # The Pages URL is derived from the repo, not hardcoded, so this keeps
+      # working if the repo is renamed or transferred.
+      - id: url
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          repo=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+          echo "value=https://${owner}.github.io/${repo}/" >> "$GITHUB_OUTPUT"
+
+      # 10.1 — reachability. Two attempts spaced 30s apart, because a single
+      # failed request is usually a blip, and paging on blips trains people
+      # to ignore alerts.
+      - id: reachable
+        name: "10.1 site responds (2 attempts)"
+        run: |
+          url="${{ steps.url.outputs.value }}"
+          ok=false
+          for attempt in 1 2; do
+            if curl -fsS --max-time 20 "$url" -o /tmp/live.html 2>/dev/null; then
+              ok=true
+              break
+            fi
+            echo "attempt $attempt failed"
+            [ "$attempt" -eq 1 ] && sleep 30
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          if [ "$ok" != "true" ]; then
+            echo "::error::$url unreachable after 2 attempts"
+            exit 1
+          fi
+
+      # 10.2 — the live build marker must match what the pipeline last
+      # verified. A mismatch means something deployed outside the pipeline,
+      # or a rollback left production behind the tag.
+      - id: drift
+        name: "10.2 build marker matches last-good"
+        if: steps.reachable.outputs.ok == 'true'
+        run: |
+          expected=$(git rev-parse --short last-good 2>/dev/null || echo "")
+          if [ -z "$expected" ]; then
+            echo "no last-good tag yet — skipping drift check"
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -q "<!-- build: $expected -->" /tmp/live.html; then
+            echo "marker matches last-good ($expected)"
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+          else
+            actual=$(grep -o '<!-- build: [a-f0-9]* -->' /tmp/live.html | head -1 || echo "none")
+            echo "::error::live marker is '$actual', expected '<!-- build: $expected -->'"
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # 10.4 — certificate expiry warning. GitHub renews Pages certs
+      # automatically, so this is a canary for that going wrong, not
+      # something you'd normally act on.
+      - name: "10.4 TLS certificate has >= 14 days left"
+        if: steps.reachable.outputs.ok == 'true'
+        continue-on-error: true
+        run: |
+          host=$(echo "${{ steps.url.outputs.value }}" | awk -F/ '{print $3}')
+          end=$(echo | openssl s_client -servername "$host" -connect "$host":443 2>/dev/null \
+                | openssl x509 -noout -enddate | cut -d= -f2)
+          end_epoch=$(date -d "$end" +%s)
+          now_epoch=$(date +%s)
+          days=$(( (end_epoch - now_epoch) / 86400 ))
+          echo "certificate expires in $days days ($end)"
+          if [ "$days" -lt 14 ]; then
+            echo "::warning::TLS certificate expires in $days days"
+          fi
+
+      # 10.5 — a light functional probe. Full suite would be wasteful every
+      # 30 minutes; these two catch "the page loads but the app is dead".
+      - uses: actions/setup-node@v4
+        if: steps.reachable.outputs.ok == 'true'
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+        if: steps.reachable.outputs.ok == 'true'
+
+      - run: npx playwright install --with-deps chromium
+        if: steps.reachable.outputs.ok == 'true'
+
+      - name: "10.5 light functional probe (4.1 + 4.3)"
+        if: steps.reachable.outputs.ok == 'true'
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ steps.url.outputs.value }}
+        run: npx playwright test -g "4.1|4.3"
+
+  # Alerting. Updates an existing open incident issue rather than opening a
+  # new one every 30 minutes — one overnight outage should produce one
+  # issue, not sixteen.
+  alert:
+    name: alert on failure
+    needs: check
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = "<!-- monitor-incident -->";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const now = new Date().toISOString();
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "monitoring",
+            });
+            const existing = open.find((i) => i.body && i.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Still failing as of ${now}. Run: ${runUrl}`,
+              });
+              core.info(`Updated existing incident #${existing.number}`);
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Production monitoring check failed (${now})`,
+                labels: ["monitoring", "incident"],
+                body: [
+                  marker,
+                  "The scheduled production health check failed.",
+                  "",
+                  "Possible causes: the site is down, the deployed build drifted from " +
+                  "`last-good` (something deployed outside the pipeline), or the app " +
+                  "loads but no longer functions.",
+                  "",
+                  `First failing run: ${runUrl}`,
+                  "",
+                  "This issue is updated with a comment on each subsequent failure. " +
+                  "Close it once the site is healthy again.",
+                ].join("\n"),
+              });
+              core.info("Opened a new incident issue");
+            }

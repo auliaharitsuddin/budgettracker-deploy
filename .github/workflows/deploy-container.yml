@@ -1,0 +1,90 @@
+# Optional container track (docs/PIPELINE-SPEC.md section 15).
+#
+# Deliberately NOT part of the main release path: it depends on a
+# third-party service, and a Render outage must never be able to block a
+# release that GitHub Pages could have served fine.
+#
+# What this track proves that the Pages track cannot: on Pages, nginx.conf
+# is never executed at all — no /healthz, no custom response headers, no
+# try_files. Here the container actually serves production, so the full
+# smoke suite (--target=container) is meaningful.
+#
+# Setup (one time):
+#   1. Render -> New -> Web Service -> "Existing Image"
+#      Image URL: ghcr.io/<owner>/<repo>:latest   (public image, no creds)
+#      Instance type: Free
+#   2. Settings -> Deploy Hook -> copy the URL
+#   3. This repo -> Settings -> Secrets -> Actions -> new secret
+#      RENDER_DEPLOY_HOOK = that URL
+#   4. Optional: repo variable RENDER_SERVICE_URL = https://<service>.onrender.com
+#      (only needed for the post-deploy verification below)
+name: deploy-container (optional)
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_verify:
+        description: "Skip post-deploy verification (use if RENDER_SERVICE_URL is not set)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy to Render
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the deploy hook secret is configured
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::secret RENDER_DEPLOY_HOOK is not set — see the header of this file for setup"
+            exit 1
+          fi
+
+      # 15.3 — Render pulls ghcr.io/<owner>/<repo>:latest itself; this only
+      # tells it to go do that now.
+      - name: Trigger the Render deploy hook
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          curl -fsS -X POST "$HOOK" -o /dev/null
+          echo "deploy triggered"
+
+      # 15.4 — the free tier spins down when idle, so the first request
+      # after a deploy can take a long time. A tight timeout here would
+      # report failure on a service that is merely waking up.
+      - name: Wait for the service to answer (up to 5 minutes)
+        if: ${{ !inputs.skip_verify && vars.RENDER_SERVICE_URL != '' }}
+        run: |
+          url="${{ vars.RENDER_SERVICE_URL }}"
+          for i in $(seq 1 60); do
+            if curl -fsS --max-time 20 "$url/healthz" >/dev/null 2>&1; then
+              echo "service is up after ~$((i * 5))s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$url did not become healthy within 5 minutes"
+          exit 1
+
+      # 15.5 — the full container smoke suite, including the nginx-specific
+      # assertions that the Pages track has to skip.
+      - name: Smoke test (full container mode — nginx really is serving here)
+        if: ${{ !inputs.skip_verify && vars.RENDER_SERVICE_URL != '' }}
+        run: bash tests/smoke.sh "${{ vars.RENDER_SERVICE_URL }}" --target=container
+
+      - name: Note when verification was skipped
+        if: ${{ inputs.skip_verify || vars.RENDER_SERVICE_URL == '' }}
+        run: |
+          {
+            echo "### Deploy triggered, verification skipped"
+            echo ""
+            echo "Set the repo variable \`RENDER_SERVICE_URL\` to enable post-deploy verification."
+          } >> "$GITHUB_STEP_SUMMARY"

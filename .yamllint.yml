@@ -1,0 +1,14 @@
+# Stage 1.3 (docs/PIPELINE-SPEC.md). Relaxed on purpose: this repo has no
+# strict formatting convention to enforce yet, we only want to catch actual
+# YAML mistakes (bad indentation, duplicate keys, tabs).
+extends: default
+
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    # GitHub Actions uses bare `on:` as a key, which is a YAML 1.1 boolean.
+    check-keys: false
+  comments-indentation: disable
+  braces:
+    max-spaces-inside: 1

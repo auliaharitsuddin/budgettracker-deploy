@@ -1,0 +1,23 @@
+# Validates every PR and every push to a non-main branch. This is the exact
+# same Stage 1-4 suite that release.yml re-runs before deploying — see
+# _test-suite.yml. A PR that goes green here is proven, not just assumed,
+# to still pass when release.yml checks it again on merge.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-suite:
+    name: test-suite
+    uses: ./.github/workflows/_test-suite.yml
+    permissions:
+      contents: read
+      security-events: write

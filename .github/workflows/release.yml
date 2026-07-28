@@ -1,0 +1,179 @@
+# Full release pipeline: Stage 1-9 from docs/PIPELINE-SPEC.md.
+#
+# Runs on every push to main. Re-runs the identical Stage 1-4 suite that
+# guarded the PR (via _test-suite.yml), then publishes, deploys, verifies
+# against the live URL, and — if that verification fails — rolls back
+# automatically without waiting for a human.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never let two releases race each other onto the same Pages site.
+# cancel-in-progress is deliberately false: cancelling a half-finished
+# deploy is how you end up with a site in an unknown state.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────── Stage 1-4 ───────────────────────────
+  # Same suite as CI. A merge commit is not the same tree as the PR head,
+  # so this is a real check, not a formality.
+  test-suite:
+    name: test-suite
+    uses: ./.github/workflows/_test-suite.yml
+    permissions:
+      contents: read
+      security-events: write
+
+  # ───────────────────────────── Stage 5 ─────────────────────────────
+  publish:
+    name: "Stage 5: publish image to GHCR"
+    needs: test-suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      repo: ${{ steps.repo.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reuse the exact image bytes Stage 2-4 tested. Rebuilding here would
+      # publish an artifact that nothing in this run actually verified.
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - run: docker load --input /tmp/budgettracker.tar
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: .
+
+      # 5.1 — GITHUB_TOKEN, not a PAT: scoped to this repo and this run.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Registry paths must be lowercase; GitHub repo names need not be.
+      - id: repo
+        run: echo "name=$(echo 'ghcr.io/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # 5.2 — push :<sha7> and :latest
+      - id: push
+        name: Tag and push
+        run: |
+          repo="${{ steps.repo.outputs.name }}"
+          sha7="${GITHUB_SHA::7}"
+          docker tag budgettracker:ci "$repo:$sha7"
+          docker tag budgettracker:ci "$repo:latest"
+          docker push "$repo:$sha7"
+          docker push "$repo:latest"
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$repo:$sha7" | cut -d@ -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $repo:$sha7 ($digest)"
+
+      # 5.4 — a push that "succeeded" can still produce something nobody
+      # can pull. Prove the artifact is usable by pulling it back by digest
+      # from a clean local state.
+      - name: Verify the image can be pulled back by digest
+        run: |
+          repo="${{ steps.repo.outputs.name }}"
+          digest="${{ steps.push.outputs.digest }}"
+          docker rmi -f "$repo:${GITHUB_SHA::7}" "$repo:latest" budgettracker:ci || true
+          docker pull "$repo@$digest"
+          echo "verified: $repo@$digest is pullable"
+
+      - name: Job summary
+        run: |
+          {
+            echo "### Stage 5: published"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| image | \`${{ steps.repo.outputs.name }}:${GITHUB_SHA::7}\` |"
+            echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| size | ${{ needs.test-suite.outputs.image-size-bytes }} bytes |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────── Stage 6-7 ───────────────────────────
+  deploy:
+    name: deploy
+    needs: publish
+    uses: ./.github/workflows/_deploy-and-verify.yml
+    with:
+      ref: ${{ github.sha }}
+      label: release
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+  # ───────────────────────────── Stage 8 ─────────────────────────────
+  # Only reached when Stage 7 verified production. `last-good` is the sole
+  # source of truth for rollback, so it moves only after proof, never on
+  # "the deploy step didn't error".
+  tag-last-good:
+    name: "Stage 8: tag last-good"
+    needs: [publish, deploy]
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Move the last-good tag to this commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f last-good "$GITHUB_SHA"
+          git push -f origin last-good
+
+      - name: Job summary
+        run: |
+          {
+            echo "### Release verified and marked good"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA::7}\` |"
+            echo "| url | ${{ needs.deploy.outputs.page_url }} |"
+            echo "| image digest | \`${{ needs.publish.outputs.digest }}\` |"
+            echo ""
+            echo ":white_check_mark: \`last-good\` now points at \`${GITHUB_SHA::7}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────────────────────── Stage 9 ─────────────────────────────
+  # Automatic rollback. Triggered only when the deploy/verify stage failed
+  # — not when Stage 1-5 failed, because in that case nothing was ever
+  # deployed and production is still fine.
+  rollback:
+    name: rollback
+    needs: deploy
+    if: failure() && needs.deploy.result == 'failure'
+    uses: ./.github/workflows/_rollback.yml
+    with:
+      failed_sha: ${{ github.sha }}
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+      issues: write
