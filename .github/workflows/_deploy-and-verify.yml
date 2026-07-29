@@ -67,12 +67,21 @@ jobs:
       - name: Prepare Pages artifact (build marker + 404.html)
         run: bash scripts/prepare-pages-artifact.sh "${{ steps.sha.outputs.value }}" dist
 
+      # Named per label: release.yml's `deploy` job and _rollback.yml's
+      # `redeploy` job both call this reusable workflow, and when rollback
+      # fires it runs inside the SAME workflow run as the release that
+      # failed. Artifact names must be unique within one run — the
+      # `upload-pages-artifact` default of "github-pages" collides and
+      # deploy-pages fails with "Multiple artifacts ... unexpectedly found".
       - uses: actions/upload-pages-artifact@v3
         with:
+          name: github-pages-${{ inputs.label }}
           path: dist
 
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ inputs.label }}
 
   # ───────────────────────────── Stage 7 ─────────────────────────────
   verify:
