@@ -120,6 +120,9 @@ if [ "$TARGET" = "container" ]; then
 
   # Header names are case-insensitive per RFC 9110, so compare lowercased.
   headers=$(curl -fsSI "$BASE/" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+  echo "DEBUG raw headers begin"
+  echo "$headers"
+  echo "DEBUG raw headers end"
   assert_contains "X-Content-Type-Options: nosniff" "$headers" "x-content-type-options: nosniff"
   assert_contains "X-Frame-Options: SAMEORIGIN" "$headers" "x-frame-options: sameorigin"
 
