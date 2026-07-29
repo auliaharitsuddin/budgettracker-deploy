@@ -10,3 +10,5 @@ test-results/
 dist/
 sbom.spdx.json
 trivy-results.sarif
+__pycache__/
+*.pyc
