@@ -34,15 +34,6 @@ if ! grep -q "<head>" "$OUT/index.html"; then
 fi
 
 sed -i "s#<head>#<head>\n<!-- build: ${SHA} -->#" "$OUT/index.html"
-
-# ─── FAULT INJECTION — rollback acceptance test retry, reverted next commit ───
-# Same fault as before: corrupts the app shell in the Pages artifact only,
-# so Stages 1-4 stay green and Stage 7 must catch it. This run exists to
-# prove the artifact-name-collision fix actually lets Stage 9 redeploy
-# last-good successfully, not just that Stage 7 detects the break.
-sed -i "s#FinanceFlow#ROLLBACKTEST#g" "$OUT/index.html"
-# ─── END FAULT INJECTION ───
-
 cp "$OUT/index.html" "$OUT/404.html"
 
 echo "prepared $OUT (marker=$SHA)"
