@@ -28,12 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # gitleaks scans full history, not just this commit
+          fetch-depth: 0  # gitleaks scans full history, not just this commit
 
       # 1.1 hadolint — Dockerfile best practices (pinned base image, USER set, ...)
+      # --failure-threshold warning: hadolint's default threshold is `info`,
+      # which fails on stylistic notes and would make this gate noisier than
+      # it is useful. Warnings and errors still block.
       - name: hadolint (Dockerfile)
         run: |
-          docker run --rm -i hadolint/hadolint:latest < Dockerfile
+          docker run --rm -i hadolint/hadolint:latest \
+            hadolint --failure-threshold warning - < Dockerfile
 
       # 1.2 actionlint — workflow syntax and expression correctness
       - name: actionlint (workflow files)
@@ -59,9 +63,17 @@ jobs:
       # directly (not the marketplace action) to avoid any license-key
       # requirement; the scanning engine itself is Apache-2.0 and free to
       # invoke however you like.
+      # The GIT_CONFIG_* vars mark /repo as a safe directory inside the
+      # container: the checkout is owned by the runner user, gitleaks runs as
+      # root, and git otherwise aborts with "detected dubious ownership"
+      # before scanning a single commit.
       - name: gitleaks (secret scan)
         run: |
-          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+          docker run --rm -v "$PWD:/repo" \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            zricethezav/gitleaks:latest \
             detect --source=/repo --no-banner -v
 
       # 1.6 nginx -t — catches a typo in nginx.conf that would otherwise
@@ -104,7 +116,7 @@ jobs:
 
       - name: deploybot drift check (only if DEPLOYBOT_REPO is set)
         if: ${{ vars.DEPLOYBOT_REPO != '' }}
-        continue-on-error: true # never let a cross-repo tool block this repo's release
+        continue-on-error: true  # never let a cross-repo tool block this repo's release
         run: |
           python3 _deploybot/deploybot.py generate . --offline --write --force
           git diff --exit-code -- Dockerfile .dockerignore docker-compose.yml .github/workflows/ci.yml || {
@@ -124,7 +136,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      security-events: write # to upload the Trivy SARIF report
+      security-events: write  # to upload the Trivy SARIF report
     outputs:
       image-size-bytes: ${{ steps.size.outputs.bytes }}
     steps:
@@ -210,7 +222,7 @@ jobs:
         with:
           name: docker-image
           path: /tmp/budgettracker.tar
-          retention-days: 1 # only needed for the rest of this run
+          retention-days: 1  # only needed for the rest of this run
 
   # ─────────────────────────── Stage 3 + 4 ───────────────────────────
   # Runtime smoke (container-level assertions) and browser functional

@@ -12,9 +12,14 @@ on:
   workflow_call:
     inputs:
       failed_sha:
-        description: "the commit that failed verification (for the issue text)"
+        description: "commit that failed verification, or a free-text reason for a manual rollback"
         required: true
         type: string
+      trigger:
+        description: "automatic | manual — changes only the wording of the incident issue"
+        required: false
+        type: string
+        default: automatic
 
 permissions:
   contents: write
@@ -30,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # need tags, not just the latest commit
+          fetch-depth: 0  # need tags, not just the latest commit
 
       - id: check
         run: |
@@ -101,26 +106,36 @@ jobs:
         with:
           script: |
             const ok = "${{ needs.redeploy.result }}" === "success";
+            const manual = "${{ inputs.trigger }}" === "manual";
             const target = "${{ needs.check-target.outputs.target_sha }}";
-            const failedSha = "${{ inputs.failed_sha }}";
+            const cause = "${{ inputs.failed_sha }}";
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
+            // A manual rollback carries a free-text reason, not a SHA, so the
+            // wording has to differ or the issue reads as nonsense
+            // ("Release manual rollback failed verification").
+            const why = manual
+              ? `A manual rollback was requested. Reason given: _${cause}_`
+              : `Commit \`${cause}\` failed Stage 7 production verification.`;
+
             const title = ok
-              ? `Rolled back to ${target} after ${failedSha} failed verification`
-              : `ROLLBACK ITSELF FAILED -- manual intervention needed (failed: ${failedSha}, target: ${target})`;
+              ? (manual
+                  ? `Manual rollback to ${target.slice(0, 7)} completed`
+                  : `Rolled back to ${target.slice(0, 7)} after ${cause.slice(0, 7)} failed verification`)
+              : `ROLLBACK ITSELF FAILED -- manual intervention needed (target: ${target.slice(0, 7)})`;
 
             const body = ok
               ? [
-                  `Commit \`${failedSha}\` failed Stage 7 production verification.`,
-                  `The pipeline automatically redeployed \`${target}\` (the last verified-good build) and re-verified it successfully.`,
+                  why,
+                  `The pipeline redeployed \`${target}\` (the last verified-good build) and re-verified it successfully.`,
                   "",
                   "`last-good` was left unchanged, since it already points at this same commit.",
                   "",
                   `Run: ${runUrl}`,
                 ].join("\n")
               : [
-                  `Commit \`${failedSha}\` failed Stage 7 production verification, `,
-                  `and the automatic rollback to \`${target}\` ALSO failed re-verification.`,
+                  why,
+                  `The rollback to \`${target}\` ALSO failed re-verification.`,
                   "",
                   "The site may currently be serving a broken build. This needs a human now.",
                   "",

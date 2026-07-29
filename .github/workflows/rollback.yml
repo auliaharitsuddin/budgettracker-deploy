@@ -20,6 +20,7 @@ jobs:
     uses: ./.github/workflows/_rollback.yml
     with:
       failed_sha: ${{ inputs.reason }}
+      trigger: manual
     permissions:
       contents: write
       pages: write

@@ -11,31 +11,48 @@ Registry (ghcr.io) yang juga gratis di tier publik.
 
 | File | Fungsi |
 |---|---|
-| `public/index.html` | aplikasinya (salinan dari `BudgetTracker/BudgetTrackerWebApp.html`) |
+| `public/index.html` | aplikasinya (salinan byte-identical dari `BudgetTracker/BudgetTrackerWebApp.html`) |
 | `Dockerfile` | nginx non-root (`nginx-unprivileged`, UID 101, port 8080) |
 | `nginx.conf` | server block: SPA fallback, `/healthz`, security header, gzip |
-| `docker-compose.yml` | menjalankan container secara lokal, read-only filesystem |
-| `tests/smoke.sh` | 5 pengecekan HTTP terhadap container yang sudah jalan |
-| `.github/workflows/ci.yml` | build → jalankan → smoke test → push ke GHCR (hanya `main`) |
+| `docker-compose.yml` | menjalankan container lokal, read-only filesystem |
+| `tests/smoke.sh` | 11 assertion HTTP, dua mode: `--target=container` / `--target=pages` |
+| `tests/e2e/` | 10 skenario Playwright (transaksi, persistensi, budget, tema, i18n) |
+| `tests/pages_sim.py` | simulator GitHub Pages untuk menguji mode `pages` tanpa deploy |
+| `scripts/prepare-pages-artifact.sh` | injeksi build marker + `404.html` untuk SPA fallback di Pages |
+| `.github/workflows/` | 8 workflow: Stage 1–10 (lihat tabel di bawah) |
+
+### Workflow
+
+| File | Trigger | Stage |
+|---|---|---|
+| `ci.yml` | PR, push non-main | 1–4 |
+| `release.yml` | push ke `main` | 1–9 |
+| `rollback.yml` | manual | 9 |
+| `monitor.yml` | cron 30 menit | 10 |
+| `deploy-container.yml` | manual | jalur Render opsional |
+| `_test-suite.yml`, `_deploy-and-verify.yml`, `_rollback.yml` | reusable | dipakai bersama oleh yang di atas |
+
+Rollback memakai jalur deploy-and-verify yang **persis sama** dengan rilis
+normal. Kalau rollback punya logika deploy sendiri, jalur itu cuma teruji
+saat insiden — justru saat paling tidak boleh gagal.
 
 ## Jalankan lokal
 
 ```bash
-docker compose up --build
-# lalu buka http://localhost:8080
+docker compose up --build          # lalu buka http://localhost:8080
+bash tests/smoke.sh                # smoke test terhadap container
+
+# Test browser terhadap container yang sedang jalan
+npm ci && npx playwright install chromium
+PLAYWRIGHT_BASE_URL=http://localhost:8080 npx playwright test
 ```
 
-Smoke test terhadap container yang sedang jalan:
+Menguji jalur Pages tanpa deploy (tidak butuh Docker):
 
 ```bash
-bash tests/smoke.sh
-```
-
-Tanpa compose:
-
-```bash
-docker build -t budgettracker:local .
-docker run --rm -p 8080:8080 budgettracker:local
+bash scripts/prepare-pages-artifact.sh testsha dist
+python tests/pages_sim.py dist 8097 &
+bash tests/smoke.sh http://localhost:8097 --target=pages --marker=testsha
 ```
 
 ## Keputusan desain
@@ -57,21 +74,20 @@ setelah deploy karena browser meng-cache satu-satunya file yang ada.
 **Push hanya dari `main`.** Job publish di-guard `github.ref` — PR dari fork
 tidak punya akses tulis ke registry, dan tidak semestinya punya.
 
-## Catatan verifikasi
+## Pipeline end-to-end
 
-Semua file di sini masih **belum pernah di-build** karena Docker tidak
-terpasang di mesin ini (`docker: command not found`). Yang sudah diverifikasi:
-YAML `ci.yml` dan `docker-compose.yml` valid secara sintaksis, `tests/smoke.sh`
-lolos `bash -n`, dan `public/index.html` identik dengan sumbernya. Langkah
-pertama setelah Docker tersedia: `docker compose up --build`, lalu
-`bash tests/smoke.sh`.
+Rancangannya di [docs/PIPELINE-SPEC.md](docs/PIPELINE-SPEC.md); status
+implementasi, penyimpangan dari spec, dan bug yang ditemukan sepanjang
+pengerjaan ada di [docs/IMPLEMENTATION-STATUS.md](docs/IMPLEMENTATION-STATUS.md).
 
-## Rencana lanjutan: pipeline end-to-end
+Semua workflow sudah ditulis dan lolos `actionlint`, `yamllint`, dan
+`shellcheck`; Playwright 10/10 hijau terhadap aplikasi sungguhan. Yang
+**belum** terverifikasi: semua yang butuh Docker (build image, Trivy, assertion
+hardening container) dan semua yang butuh repo remote (eksekusi Actions, deploy
+Pages, rollback). Docker tidak terpasang di mesin tempat ini dikerjakan.
 
-Pipeline di repo ini masih **CI saja** — berhenti setelah image ter-push ke
-registry. Belum ada deploy ke lingkungan hidup, verifikasi pasca-deploy, maupun
-rollback otomatis. Rancangan untuk melengkapinya (target GitHub Pages, 10 stage,
-9 gate, semuanya gratis) ada di [docs/PIPELINE-SPEC.md](docs/PIPELINE-SPEC.md).
+Langkah manual yang tersisa sebelum pipeline benar-benar hidup ada di
+[bagian 6 IMPLEMENTATION-STATUS](docs/IMPLEMENTATION-STATUS.md#6-langkah-manual-yang-tersisa-stage-0).
 
 ## Deploy ke hosting
 

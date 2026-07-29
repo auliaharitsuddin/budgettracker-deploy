@@ -28,15 +28,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # need the last-good tag for the drift check
+          fetch-depth: 0  # need the last-good tag for the drift check
 
-      # The Pages URL is derived from the repo, not hardcoded, so this keeps
-      # working if the repo is renamed or transferred.
+      # Ask the API for the real Pages URL rather than constructing it.
+      # A user/org site (repo named <owner>.github.io) is served at the apex
+      # with no /<repo>/ path segment, so string-building the URL is wrong
+      # for that case and silently monitors a 404.
       - id: url
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          repo=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
-          echo "value=https://${owner}.github.io/${repo}/" >> "$GITHUB_OUTPUT"
+          url=$(gh api "repos/${{ github.repository }}/pages" --jq '.html_url' 2>/dev/null || echo "")
+          if [ -z "$url" ]; then
+            echo "::error::GitHub Pages is not enabled for this repo (see docs/PIPELINE-SPEC.md Stage 0)"
+            exit 1
+          fi
+          echo "value=$url" >> "$GITHUB_OUTPUT"
+          echo "monitoring $url"
 
       # 10.1 — reachability. Two attempts spaced 30s apart, because a single
       # failed request is usually a blip, and paging on blips trains people
@@ -63,23 +71,29 @@ jobs:
       # 10.2 — the live build marker must match what the pipeline last
       # verified. A mismatch means something deployed outside the pipeline,
       # or a rollback left production behind the tag.
+      # A release deploys before it moves `last-good` (that only happens
+      # after Stage 7 verifies). So during a release window the live marker
+      # is legitimately main's HEAD while the tag still points at the
+      # previous build. Accepting either value avoids alerting on every
+      # single deploy; anything else genuinely came from outside the
+      # pipeline, or from a rollback that left production behind.
       - id: drift
-        name: "10.2 build marker matches last-good"
+        name: "10.2 build marker matches last-good (or main, mid-deploy)"
         if: steps.reachable.outputs.ok == 'true'
         run: |
           expected=$(git rev-parse --short last-good 2>/dev/null || echo "")
+          head=$(git rev-parse --short origin/main 2>/dev/null || git rev-parse --short HEAD)
           if [ -z "$expected" ]; then
-            echo "no last-good tag yet — skipping drift check"
-            echo "drifted=false" >> "$GITHUB_OUTPUT"
+            echo "no last-good tag yet - skipping drift check"
             exit 0
           fi
           if grep -q "<!-- build: $expected -->" /tmp/live.html; then
             echo "marker matches last-good ($expected)"
-            echo "drifted=false" >> "$GITHUB_OUTPUT"
+          elif grep -q "<!-- build: $head -->" /tmp/live.html; then
+            echo "::notice::marker is main HEAD ($head), not yet last-good ($expected) - a release is probably mid-flight"
           else
-            actual=$(grep -o '<!-- build: [a-f0-9]* -->' /tmp/live.html | head -1 || echo "none")
-            echo "::error::live marker is '$actual', expected '<!-- build: $expected -->'"
-            echo "drifted=true" >> "$GITHUB_OUTPUT"
+            actual=$(grep -o '<!-- build: [0-9a-f]* -->' /tmp/live.html | head -1 || echo "none")
+            echo "::error::live marker is '$actual'; expected last-good ($expected) or main ($head)"
             exit 1
           fi
 
