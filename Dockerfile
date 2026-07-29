@@ -1,6 +1,6 @@
 # FinanceFlow (BudgetTracker) — static single-page app served by nginx.
 # nginx-unprivileged runs as UID 101 (non-root) and listens on 8080.
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.31-alpine
 
 # Replace the default server block with ours (SPA fallback + /healthz).
 COPY nginx.conf /etc/nginx/conf.d/default.conf
