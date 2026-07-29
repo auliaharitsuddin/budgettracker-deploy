@@ -5,6 +5,13 @@
 // Each test uses a fresh browser context (Playwright's default) so
 // localStorage never leaks between tests, except where a test explicitly
 // needs to simulate a reload of an existing session (4.4, 4.7, 4.8).
+//
+// Navigation is always page.goto("./"), never "/". Playwright resolves the
+// argument with `new URL(arg, baseURL)`, and a leading slash discards
+// baseURL's path — against the project Pages URL
+// (https://<user>.github.io/budgettracker-deploy/) "/" would resolve to
+// https://<user>.github.io/, i.e. a different site entirely. "./" resolves
+// correctly for both the container and the Pages base URL.
 const { test, expect } = require("@playwright/test");
 
 async function addTransaction(page, { type, amount, desc }) {
@@ -29,7 +36,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
     });
     page.on("pageerror", (err) => pageErrors.push(String(err)));
 
-    await page.goto("/");
+    await page.goto("./");
     await expect(page.locator("#page-dashboard")).toBeVisible();
 
     expect(consoleErrors, `console errors: ${consoleErrors.join("; ")}`).toHaveLength(0);
@@ -38,7 +45,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
 
   // 4.2 — Chart.js must actually render a chart, not just load the script.
   test("4.2 Chart.js renders the dashboard cash flow chart", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     const hasChart = await page.evaluate(() => typeof window.Chart !== "undefined");
     expect(hasChart).toBe(true);
 
@@ -51,7 +58,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
 
   // 4.3 — the core write path: add a transaction, see it reflected in the UI.
   test("4.3 adding a transaction updates the transactions list", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     const marker = `E2E-ADD-${Date.now()}`;
 
     await addTransaction(page, { type: "Expense", amount: "42.50", desc: marker });
@@ -64,7 +71,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
   // 4.4 — data must survive a reload; this is the whole point of localStorage
   // persistence, and the one regression a container swap could plausibly cause.
   test("4.4 transactions and a ff_ localStorage key persist across reload", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     const marker = `E2E-PERSIST-${Date.now()}`;
     await addTransaction(page, { type: "Expense", amount: "10", desc: marker });
 
@@ -80,7 +87,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
 
   // 4.5 — set a per-category budget limit and confirm it is tracked.
   test("4.5 setting a category budget shows up in the budget grid", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     await page.click('button[onclick="navigate(\'budgets\')"]');
     await expect(page.locator("#page-budgets")).toBeVisible();
 
@@ -98,7 +105,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
 
   // 4.6 — a recurring item must appear in its list after being saved.
   test("4.6 adding a recurring expense shows up in its list", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     await page.click('button[onclick="navigate(\'recurring\')"]');
     await expect(page.locator("#page-recurring")).toBeVisible();
 
@@ -117,7 +124,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
   // 4.7 — theme toggle must flip the DOM attribute and survive a reload,
   // proving both the toggle and its persistence path work.
   test("4.7 theme toggle switches and persists across reload", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     const before = await page.locator("body").getAttribute("data-theme");
 
     await page.click(".theme-toggle");
@@ -131,7 +138,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
 
   // 4.8 — language toggle must change visible UI text and persist.
   test("4.8 language toggle switches UI text and persists across reload", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("./");
     const before = await page.locator('[data-i18n="nav_dashboard"]').first().textContent();
 
     await page.click(".lang-toggle");
@@ -160,7 +167,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
     test.fail(); // must be inside the test body — at describe level it would
     // mark every test in the block as expected-to-fail.
     await page.setViewportSize({ width: 375, height: 800 });
-    await page.goto("/");
+    await page.goto("./");
 
     const { scrollWidth, clientWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
@@ -178,7 +185,7 @@ test.describe("BudgetTracker functional smoke (Stage 4)", () => {
       type: "non-blocking",
       description: "depends on unpkg.com availability at runtime",
     });
-    await page.goto("/");
+    await page.goto("./");
     const hasTesseract = await page
       .waitForFunction(() => typeof window.Tesseract !== "undefined", { timeout: 8000 })
       .then(() => true)
