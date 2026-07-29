@@ -34,6 +34,15 @@ if ! grep -q "<head>" "$OUT/index.html"; then
 fi
 
 sed -i "s#<head>#<head>\n<!-- build: ${SHA} -->#" "$OUT/index.html"
+
+# ─── FAULT INJECTION — rollback acceptance test, reverted in the next commit ───
+# Simulates a packaging bug that corrupts the app shell in the Pages artifact
+# only. The container never runs this script (the Dockerfile COPYs public/
+# directly), so Stages 2-4 stay green and the fault reaches production — which
+# is exactly the class of failure Stage 7 exists to catch and Stage 9 to undo.
+sed -i "s#FinanceFlow#ROLLBACKTEST#g" "$OUT/index.html"
+# ─── END FAULT INJECTION ───
+
 cp "$OUT/index.html" "$OUT/404.html"
 
 echo "prepared $OUT (marker=$SHA)"
